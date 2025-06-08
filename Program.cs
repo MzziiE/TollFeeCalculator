@@ -1,5 +1,5 @@
 using TollFeeCalculator.Config;
-using TollFeeCalculator.Exceptions;
+using TollFeeCalculator.Services;
 
 namespace TollFeeCalculator;
 
@@ -11,13 +11,9 @@ class Program
         {
             await RunTollCalculatorDemo();
         }
-        catch (TollCalculatorException ex)
-        {
-            Console.WriteLine($"Toll calculation error: {ex.Message}");
-        }
         catch (Exception ex)
         {
-            Console.WriteLine($"Unexpected error: {ex.Message}");
+            Console.WriteLine($"Error: {ex.Message}");
         }
 
         Console.WriteLine("\nPress any key to exit...");
@@ -26,59 +22,88 @@ class Program
 
     private static async Task RunTollCalculatorDemo()
     {
-        // Create instances of vehicles
+        using var httpClient = new HttpClient();
+        // Add your API key here if needed
+        // httpClient.DefaultRequestHeaders.Add("X-Api-Key", "your-api-key");
+
+        var holidayService = new HolidayService(httpClient);
+        var calculator = new TollCalculator(holidayService);
+
+        // Create test vehicles
         var car = new Car();
         var motorbike = new Motorbike();
 
-        var holidays = await new TollFeeConfig().GetHolidays();
-
-        // Create passages across multiple days
-        var passages = new DateTime[]
+        // Create sample passages
+        var passages = new List<DateTime>
         {
-            // Day 1 - May 15
-            new DateTime(2013, 5, 15, 7, 0, 0),   // 7:00 AM - Peak hour (18 kr)
-            new DateTime(2013, 5, 15, 7, 30, 0),  // 7:30 AM - Within same hour (highest fee applies)
-            new DateTime(2013, 5, 15, 15, 45, 0), // 3:45 PM - Another peak hour (18 kr)
-            new DateTime(2013, 5, 15, 16, 2, 0),  // 4:02 PM - Within 60 min of previous (highest fee applies)
-            new DateTime(2013, 5, 15, 18, 0, 0),  // 6:00 PM - Off-peak (8 kr)
+            // May 1st (Public Holiday)
+            new(2013, 5, 1, 7, 0, 0),
+            new(2025, 5, 2, 8, 0, 0),
 
-            // Day 2 - May 16
-            new DateTime(2013, 5, 16, 8, 0, 0),   // 8:00 AM - Peak hour (13 kr)
-            new DateTime(2013, 5, 16, 14, 35, 0), // 2:35 PM - Off-peak (8 kr)
-            new DateTime(2013, 5, 16, 16, 0, 0),  // 4:00 PM - Peak hour (18 kr)
+            // May 15th
+            new(2013, 5, 15, 7, 0, 0),   // 18 kr
+            new(2013, 5, 15, 7, 30, 0),  // Within 60 min of previous
+            new(2013, 5, 15, 15, 45, 0), // 18 kr
+            new(2013, 5, 15, 16, 2, 0),  // Within 60 min of previous
+            new(2013, 5, 15, 18, 0, 0),  // 8 kr
 
-            // Day 3 - July 1 (Free - July is toll-free)
-            new DateTime(2013, 7, 1, 8, 0, 0),
-            new DateTime(2013, 7, 1, 16, 0, 0),
+            // May 16th
+            new(2013, 5, 16, 8, 0, 0),   // 13 kr
+            new(2013, 5, 16, 14, 35, 0), // 8 kr
+            new(2013, 5, 16, 16, 0, 0),  // 18 kr
+
+            // July 1st (Toll-free month)
+            new(2013, 7, 1, 8, 0, 0),
+            new(2013, 7, 1, 16, 0, 0),
         };
 
-        var calculator = new TollCalculator();
+        // Calculate and display results for car
+        Console.WriteLine("=== Car Toll Fees ===");
+        await DisplayTollFees(calculator, car, passages);
 
-        // Calculate tolls for multiple days
-        Console.WriteLine("=== Multi-day Car Passages ===");
-        var carTollFees = calculator.GetTollFees(car, passages);
+        // Calculate and display results for motorbike (should be free)
+        Console.WriteLine("\n=== Motorbike Toll Fees (Should be Free) ===");
+        await DisplayTollFees(calculator, motorbike, passages);
+    }
 
-        foreach (var (date, fee) in carTollFees.OrderBy(x => x.Key))
+    private static async Task DisplayTollFees(TollCalculator calculator, IVehicle vehicle, List<DateTime> passages)
+    {
+        var fees = await calculator.GetTollFees(vehicle, passages);
+
+        foreach (var (date, totalFee) in fees.OrderBy(x => x.Key))
         {
             Console.WriteLine($"\nDate: {date:yyyy-MM-dd}");
-            Console.WriteLine($"Total toll fee: {fee} kr");
+            Console.WriteLine($"Total toll fee: {totalFee} kr");
 
-            // Show individual passage fees for this day
-            var dayPassages = passages.Where(p => p.Date == date);
-            foreach (var passage in dayPassages)
+            // Show passages that affect the fee
+            var dayPassages = passages
+                .Where(p => p.Date == date)
+                .OrderBy(p => p)
+                .ToList();
+
+            if (dayPassages.Any())
             {
-                var passageFee = calculator.GetTollFee(passage, car);
-                Console.WriteLine($"  Passage at {passage:HH:mm}: {passageFee} kr");
+                var lastTime = dayPassages[0];
+                var lastFee = await calculator.GetTollFee(vehicle, new List<DateTime> { lastTime });
+                if (lastFee > 0)
+                {
+                    Console.WriteLine($"  Passage at {lastTime:HH:mm}: {lastFee} kr");
+                }
+
+                foreach (var passage in dayPassages.Skip(1))
+                {
+                    var timeDiff = passage - lastTime;
+                    if (timeDiff.TotalMinutes > TollFeeConfig.SingleChargeIntervalMinutes)
+                    {
+                        var fee = await calculator.GetTollFee(vehicle, new List<DateTime> { passage });
+                        if (fee > 0)
+                        {
+                            Console.WriteLine($"  Passage at {passage:HH:mm}: {fee} kr");
+                            lastTime = passage;
+                        }
+                    }
+                }
             }
-        }
-
-        // Calculate tolls for motorbike (should be free)
-        Console.WriteLine("\n=== Multi-day Motorbike Passages (Should be Free) ===");
-        var bikeTollFees = calculator.GetTollFees(motorbike, passages);
-
-        foreach (var (date, fee) in bikeTollFees.OrderBy(x => x.Key))
-        {
-            Console.WriteLine($"Date: {date:yyyy-MM-dd}, Total toll fee: {fee} kr");
         }
     }
 }

@@ -20,7 +20,7 @@ public class TollFeeInterval
 
     public bool IsWithinInterval(DateTime date)
     {
-        TimeSpan time = date.TimeOfDay;
+        var time = date.TimeOfDay;
         return time >= StartTime && time <= EndTime;
     }
 } 

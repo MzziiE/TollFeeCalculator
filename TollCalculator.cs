@@ -1,30 +1,50 @@
-using System;
+using System.Data;
 using TollFeeCalculator.Config;
 using TollFeeCalculator.Exceptions;
+using TollFeeCalculator.Extensions;
+using TollFeeCalculator.Services;
 
 namespace TollFeeCalculator;
 
 public class TollCalculator
 {
+    private readonly IHolidayService _holidayService;
+
+    public TollCalculator(IHolidayService holidayService)
+    {
+        _holidayService = holidayService;
+    }
+
     /// <summary>
     /// Calculate toll fees for multiple days
     /// </summary>
     /// <param name="vehicle">The vehicle making the passages</param>
     /// <param name="dates">Date and time of all passages across any number of days</param>
     /// <returns>Dictionary with dates as keys and total toll fees as values</returns>
-    public Dictionary<DateTime, int> GetTollFees(IVehicle vehicle, DateTime[] dates)
+    public async Task<Dictionary<DateTime, int>> GetTollFees(IVehicle vehicle, List<DateTime> dates)
     {
-        if (dates == null || dates.Length == 0)
+        if (dates == null || !dates.Any())
         {
             throw new InvalidPassageDatesException("Passage dates cannot be null or empty");
         }
 
-        return dates
-            .GroupBy(d => d.Date)
-            .ToDictionary(
-                group => group.Key,
-                group => GetTollFee(vehicle, group.ToArray())
-            );
+        var result = new Dictionary<DateTime, int>();
+
+        foreach (var group in dates.GroupBy(d => d.Date))
+        {
+            // First check if this date is toll-free
+            if (await IsTollFreeDate(group.Key))
+            {
+                result.Add(group.Key, 0);
+                continue;
+            }
+
+            // If not toll-free, calculate the fee
+            var dailyFee = await GetTollFee(vehicle, group.ToList());
+            result.Add(group.Key, dailyFee);
+        }
+
+        return result;
     }
 
     /// <summary>
@@ -35,7 +55,7 @@ public class TollCalculator
     /// <returns>The total toll fee for that day</returns>
     /// <exception cref="InvalidPassageDatesException">Thrown when dates array is null or empty</exception>
     /// <exception cref="MultipleDaysException">Thrown when passages span multiple days</exception>
-    public int GetTollFee(IVehicle vehicle, DateTime[] dates)
+    public async Task<int> GetTollFee(IVehicle vehicle, List<DateTime> dates)
     {
         ValidatePassages(dates);
 
@@ -44,43 +64,47 @@ public class TollCalculator
             return 0;
         }
 
-        var sortedDates = dates.OrderBy(d => d).ToArray();
-        DateTime intervalStart = sortedDates[0];
-        int totalFee = 0;
-        int tempFee = GetTollFee(intervalStart, vehicle);
+        var sortedDates = dates.OrderBy(d => d).ToList();
+        var totalFee = 0;
+        var currentIntervalStart = sortedDates[0];
+        var currentIntervalFee = await GetSinglePassageFee(currentIntervalStart, vehicle);
 
-        foreach (DateTime date in sortedDates.Skip(1))
+        foreach (var date in sortedDates.Skip(1))
         {
-            int nextFee = GetTollFee(date, vehicle);
-            TimeSpan timeDiff = date - intervalStart;
+            var fee = await GetSinglePassageFee(date, vehicle);
+            var timeDiff = date - currentIntervalStart;
 
-            if (timeDiff.TotalMinutes <= TollFeeConfig.SingleChargeIntervalMinutes)
+            if (timeDiff.TotalMinutes > TollFeeConfig.SingleChargeIntervalMinutes)
             {
-                // Within single charge interval, only charge the highest fee
-                if (nextFee > tempFee)
-                {
-                    totalFee = totalFee - tempFee + nextFee;
-                    tempFee = nextFee;
-                }
+                totalFee += currentIntervalFee;
+                currentIntervalStart = date;
+                currentIntervalFee = fee;
             }
             else
             {
-                // New interval starts
-                totalFee += nextFee;
-                intervalStart = date;
-                tempFee = nextFee;
+                currentIntervalFee = Math.Max(currentIntervalFee, fee);
             }
         }
 
-        // Add the fee for the first passage
-        totalFee += tempFee;
-
+        totalFee += currentIntervalFee;
         return Math.Min(totalFee, TollFeeConfig.MaxDailyFee);
     }
 
-    private void ValidatePassages(DateTime[] dates)
+    private async Task<int> GetSinglePassageFee(DateTime date, IVehicle vehicle)
     {
-        if (dates == null || dates.Length == 0)
+        if (await IsTollFreeDate(date) || IsTollFreeVehicle(vehicle))
+        {
+            return 0;
+        }
+
+        return TollFeeConfig.FeeIntervals
+            .FirstOrDefault(interval => interval.IsWithinInterval(date))
+            ?.Fee ?? 0;
+    }
+
+    private void ValidatePassages(List<DateTime> dates)
+    {
+        if (dates == null || !dates.Any())
         {
             throw new InvalidPassageDatesException("Passage dates cannot be null or empty");
         }
@@ -95,50 +119,23 @@ public class TollCalculator
     private bool IsTollFreeVehicle(IVehicle vehicle)
     {
         if (vehicle == null) return false;
-
-        string vehicleType = vehicle.GetVehicleType();
-        return Enum.TryParse<TollFreeVehicles>(vehicleType, out var _);
+        return Enum.TryParse<TollFreeVehicles>(vehicle.GetVehicleType(), out _);
     }
 
-    public int GetTollFee(DateTime date, IVehicle vehicle)
+    private async Task<bool> IsTollFreeDate(DateTime date)
     {
-        if (IsTollFreeDate(date) || IsTollFreeVehicle(vehicle))
-        {
-            return 0;
-        }
-
-        foreach (var interval in TollFeeConfig.FeeIntervals)
-        {
-            if (interval.IsWithinInterval(date))
-            {
-                return interval.Fee;
-            }
-        }
-
-        return 0; // Free passage outside of toll hours
-    }
-
-    private bool IsTollFreeDate(DateTime date)
-    {
-        // Free on weekends
-        if (date.DayOfWeek == DayOfWeek.Saturday || date.DayOfWeek == DayOfWeek.Sunday)
+        if (date.DayOfWeek is DayOfWeek.Saturday or DayOfWeek.Sunday)
         {
             return true;
         }
 
-        // Free during toll-free months (e.g., July)
         if (TollFeeConfig.TollFreeMonths.Contains(date.Month))
         {
             return true;
         }
 
-        // Free on holidays (only 2013 implemented)
-        if (date.Year == 2013)
-        {
-            return TollFeeConfig.Holidays2013.Contains((date.Month, date.Day));
-        }
-
-        return false;
+        var holidays = await _holidayService.GetHolidays(date.Year);
+        return holidays.Any(h => h.Date == date.Date);
     }
 
     private enum TollFreeVehicles
