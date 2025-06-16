@@ -1,5 +1,3 @@
-using TollFeeCalculator.Enums;
-
 namespace TollFeeCalculator.Vehicles;
 
 public class Bus : IVehicle
@@ -8,5 +6,4 @@ public class Bus : IVehicle
     {
         return "Bus";
     }
-    public VehicleOwnership VehicleOwnership { get; set; } = VehicleOwnership.Private;
 }
