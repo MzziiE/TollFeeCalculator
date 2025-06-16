@@ -1,5 +1,7 @@
+using Microsoft.Extensions.DependencyInjection;
+using TollFeeCalculator.Extensions;
 using TollFeeCalculator.Config;
-using TollFeeCalculator.Services;
+using TollFeeCalculator.Vehicles;
 
 namespace TollFeeCalculator;
 
@@ -22,23 +24,31 @@ class Program
 
     private static async Task RunTollCalculatorDemo()
     {
-        using var httpClient = new HttpClient();
-        // Add your API key here if needed
-        // httpClient.DefaultRequestHeaders.Add("X-Api-Key", "your-api-key");
+        // Set up dependency injection
+        var services = new ServiceCollection();
 
-        var holidayService = new HolidayService(httpClient);
-        var calculator = new TollCalculator(holidayService);
+        // Register services for toll calculator
+        services.Initialize();
+
+        // Build service provider
+        using var serviceProvider = services.BuildServiceProvider();
+
+        // Get the toll calculator service
+        var calculator = serviceProvider.GetRequiredService<ITollCalculator>();
 
         // Create test vehicles
-        var car = new Car();
-        var motorbike = new Motorbike();
+        var vehicles = new List<IVehicle>
+        {
+            new Car(),
+            new Motorbike(),
+            new Bus(),
+        };
 
         // Create sample passages
         var passages = new List<DateTime>
         {
             // May 1st (Public Holiday)
             new(2013, 5, 1, 7, 0, 0),
-            new(2025, 5, 2, 8, 0, 0),
 
             // May 15th
             new(2013, 5, 15, 7, 0, 0),   // 18 kr
@@ -59,14 +69,14 @@ class Program
 
         // Calculate and display results for car
         Console.WriteLine("=== Car Toll Fees ===");
-        await DisplayTollFees(calculator, car, passages);
-
-        // Calculate and display results for motorbike (should be free)
-        Console.WriteLine("\n=== Motorbike Toll Fees (Should be Free) ===");
-        await DisplayTollFees(calculator, motorbike, passages);
+        foreach (var vehicle in vehicles)
+        {
+            Console.WriteLine($"\n=== {vehicle.GetVehicleType()} Toll Fees (Should be Free) ===");
+            await DisplayTollFees(calculator, vehicle, passages);
+        }
     }
 
-    private static async Task DisplayTollFees(TollCalculator calculator, IVehicle vehicle, List<DateTime> passages)
+    private static async Task DisplayTollFees(ITollCalculator calculator, IVehicle vehicle, List<DateTime> passages)
     {
         var fees = await calculator.GetTollFees(vehicle, passages);
 
@@ -81,7 +91,7 @@ class Program
                 .OrderBy(p => p)
                 .ToList();
 
-            if (dayPassages.Any())
+            if (dayPassages.Any() && totalFee > 0)
             {
                 var lastTime = dayPassages[0];
                 var lastFee = await calculator.GetTollFee(vehicle, new List<DateTime> { lastTime });
@@ -103,6 +113,10 @@ class Program
                         }
                     }
                 }
+            }
+            else if (totalFee == 0)
+            {
+                Console.WriteLine($"  Vehicle type '{vehicle.GetVehicleType()}' is toll-free");
             }
         }
     }
